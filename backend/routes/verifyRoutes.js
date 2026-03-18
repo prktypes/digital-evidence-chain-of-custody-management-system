@@ -1,40 +1,44 @@
-const express = require('express');
-const multer = require('multer');
-const path = require('path');
-
-const Evidence = require('../models/evidenceModel');
-const { hashBufferOrFile } = require('../utils/hash');
-const { nowISO } = require('../utils/timestamp');
+const express = require("express");
+const multer = require("multer");
+const db = require("../db");
+const generateHash = require("../utils/hash");
 
 const router = express.Router();
-const upload = multer({ dest: path.join(__dirname, '..', 'uploads') });
 
-// POST /api/verify/hash - verify by hash value
-router.post('/hash', async (req, res) => {
-  const { hash } = req.body;
-  if (!hash) return res.status(400).json({ error: 'Missing hash' });
+const upload = multer({ dest: "uploads/" });
 
-  try {
-    const found = await Evidence.findOne({ hash });
-    res.json({ match: !!found, evidence: found || null, checkedAt: nowISO() });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Verification failed' });
-  }
-});
+router.post("/verify", upload.single("file"), (req, res) => {
+  const file = req.file;
+  const { evidence_id, user } = req.body;
 
-// POST /api/verify/file - verify by uploading a file to compute its hash
-router.post('/file', upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const newHash = generateHash(file.path);
 
-  try {
-    const hash = await hashBufferOrFile(req.file.path);
-    const found = await Evidence.findOne({ hash });
-    res.json({ hash, match: !!found, evidence: found || null, checkedAt: nowISO() });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Verification failed' });
-  }
+  db.get(
+    "SELECT * FROM evidence WHERE id = ?",
+    [evidence_id],
+    (err, row) => {
+      if (!row) return res.send("Not found");
+
+      let result = "Verified";
+
+      if (newHash !== row.file_hash) {
+        result = "Tampered";
+      }
+
+      db.run(
+        "UPDATE evidence SET status = ? WHERE id = ?",
+        [result, evidence_id]
+      );
+
+      db.run(
+        `INSERT INTO logs (evidence_id, user, action, timestamp)
+         VALUES (?, ?, ?, ?)`,
+        [evidence_id, user, "VERIFY", new Date().toISOString()]
+      );
+
+      res.json({ result });
+    }
+  );
 });
 
 module.exports = router;
